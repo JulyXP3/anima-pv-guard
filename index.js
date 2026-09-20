@@ -53,13 +53,23 @@ const SNAPSHOT_ENTRY_NAMES = [
 const LIVE_FALLBACK_WHEN_NO_SNAPSHOT = true;
 
 /**
- * 可选加强：伪造生成收尾时，Anima 的 generation_ended 处理器还会跑
- * clearRagEntry/clearKnowledgeEntry + 状态更新(generateText) + 总结检查。
- * 置为 true 会在 CHAT_COMPLETION_SETTINGS_READY 时刻先补发一次
- * generation_stopped，让那段逻辑走“生成被中断”的提前返回。
- * 代价：会向全局事件总线补发一个合成事件，属于进阶手段，默认关闭。
+ * 伪造生成收尾时，让 Anima 挂在 generation_ended 上的自动化提前返回。
+ *
+ * 为什么需要：不这么做的话，点开/刷新提示词查看器会额外触发一次**状态变量更新**
+ * （handleStatusUpdate -> generateText 的"状态"模型调用），顺带还会清空注入条目、
+ * 跑一遍总结检查 —— 这些都挂在 generation_ended 上，而伪造生成确实会发出这个事件
+ * （Generate 里 deactivateSendButtons() 显示了停止按钮，查看器随后 stopGeneration()
+ * 里的 hideStopButton() 就 emit 了 GENERATION_ENDED）。
+ *
+ * 做法：这类生成收到 CHAT_COMPLETION_SETTINGS_READY 时（就在查看器调用
+ * stopGeneration() 之前）先补发一次 generation_stopped，Anima 的处理器会命中
+ * 它自己的 if (wasGenerationStopped) return; 提前返回。
+ *
+ * 只对"被跳过的伪造生成"生效，真实回合一个字节都不多发。
+ * 代价：向全局事件总线补发一个合成事件（理论上可能打扰同一时刻正在跑
+ * generateRaw 的扩展，实际极少见）。
  */
-const SUPPRESS_ANIMA_POST_GEN = false;
+const SUPPRESS_ANIMA_POST_GEN = true;
 
 // ---------------------------------------------------------------- 运行时状态
 

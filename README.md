@@ -15,7 +15,7 @@
 
 ## 解决什么问题
 
-点开/刷新酒馆的「提示词查看器」时，**会真的触发一次 RAG 检索**——后端 `/query` → 调用一次**向量模型 API**（开了重排还会再调一次重排模型），并且重写一遍世界书里的注入条目。
+点开/刷新酒馆的「提示词查看器」时，**会真的触发一次 RAG 检索**——后端 `/query` → 调用一次**向量模型 API**（开了重排还会再调一次重排模型），并且重写一遍世界书里的注入条目。因为这次伪造生成还会发出 `GENERATION_ENDED`，Anima 的收尾自动化也会跟着跑一遍：**一次多余的「状态变量更新」模型调用**，外加清空注入条目、跑一次总结检查。
 
 原因是「提示词查看器」靠伪造一次真实生成来抓取提示词：它调用 `Generate('normal')`，直到 `CHAT_COMPLETION_SETTINGS_READY` 才 abort。而酒馆在这之前就会跑扩展拦截器，Anima 的拦截器白名单里包含 `normal`，于是这次伪造生成被当成真实回合，整套检索白跑一遍（聊天补全本身倒是被 abort 掉了，不花聊天模型的钱）。
 
@@ -151,11 +151,11 @@ AnimaPVGuard.setEnabled(false) // 等于面板取消勾选
 | 常量 | 默认 | 作用 |
 | --- | --- | --- |
 | `LIVE_FALLBACK_WHEN_NO_SNAPSHOT` | `true` | 还没有快照时（刚刷新过页面、这一局还没聊过）放行一次真实检索，保证查看器里看到完整提示词（花一次向量调用）。设为 `false` 则一律跳过，此时查看器里没有记忆块 |
-| `SUPPRESS_ANIMA_POST_GEN` | `false` | 改为 `true` 后，会在 `CHAT_COMPLETION_SETTINGS_READY` 时刻对伪造生成补发一次 `generation_stopped`，使 Anima 的生成收尾流程（清空注入条目 / 状态更新 / 总结检查）走"生成被中断"的提前返回。代价是向全局事件总线补发合成事件 |
+| `SUPPRESS_ANIMA_POST_GEN` | `true` | 伪造生成收尾时，让 Anima 挂在 `generation_ended` 上的自动化提前返回 —— 于是点查看器**不再触发状态变量更新**（那是一次真实的"状态"模型调用），也不清空注入条目、不跑总结检查。做法是在 `CHAT_COMPLETION_SETTINGS_READY` 时刻对这类生成补发一次 `generation_stopped`，Anima 会命中它自己的"生成被中断"分支。只对伪造生成生效，真实回合不受影响。代价是向全局事件总线补发一个合成事件 |
 
 ## 预期变化（不是故障）
 
-1. 打开查看器时 Anima 的 `generation_started` 仍会跑（状态倒计时被取消等），这是它自己的监听器，本补丁不碰。
+1. 打开查看器时 Anima 的 `generation_started` 仍会跑（把 `isGenerationActive` 置真、取消状态倒计时），这是它自己的监听器，本补丁不碰；但它的**收尾**自动化已经被 `SUPPRESS_ANIMA_POST_GEN` 提前返回掉了，所以不会再触发状态变量更新。验证：点查看器后应看到 Anima 自己那句 `[Anima] ⚠️ 检测到生成被中断，跳过所有自动化流程。`，且**没有** `[Anima Status] 🚀 Trigger Update for Msg #…`，倒计时面板也不弹。
 2. 换聊天后第一处打开查看器：快照已作废，若 `LIVE_FALLBACK_WHEN_NO_SNAPSHOT` 为真会真检索一次（日志会写「尚无记忆块快照，放行一次真实检索」）。
 3. 调试信息：控制台执行 `AnimaPVGuard.status()` 可以看到 `hasSnapshot` / `snapshotPreview`（各条目回填了多少字）。
 
@@ -169,6 +169,11 @@ AnimaPVGuard.setEnabled(false) // 等于面板取消勾选
 | 找不到 `Embedding Request` | 它只在后端终端；Docker 里跑的酒馆用 `docker logs -f <容器名>` |
 
 ## 更新记录
+
+### v1.2.1 · 2026-09-18
+
+1. **修复：点开/刷新提示词查看器时，仍会触发一次「状态变量更新」**（一次真实的"状态"模型调用），另外还会清空注入条目、跑一遍总结检查。原因是这些自动化都挂在 `generation_ended` 上，而伪造生成确实会发出这个事件（`deactivateSendButtons()` 显示了停止按钮 → 查看器 `stopGeneration()` 里的 `hideStopButton()` 就 emit 了它）。现在 `SUPPRESS_ANIMA_POST_GEN` 默认为 `true`：对这类生成补发一次 `generation_stopped`，让 Anima 走"生成被中断"的提前返回。
+2. 只对伪造生成生效 —— 正常聊天、swipe、扮演那些回合的状态更新一个字节都不受影响。
 
 ### v1.2.0 · 2026-09-18
 

@@ -27,7 +27,7 @@
 2. 酒馆 → 扩展 → 安装扩展 → 粘贴本仓库地址：
 
    ```
-   https://github.com/JulyXP3/Anima-PV-Guard
+   https://github.com/JulyXP3/anima-pv-guard
    ```
 
 3. F5 刷新页面（新扩展目录无需重启 Node 服务）。

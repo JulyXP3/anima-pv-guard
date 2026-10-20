@@ -46,9 +46,16 @@ const SNAPSHOT_ENTRY_NAMES = [
 ];
 
 /**
- * 还没有快照时（例如刚刷新过页面、这一局还没聊过）怎么办：
- *  true  = 放行一次真实检索，保证查看器里看到的是最新、完整的提示词（花一次向量调用）
- *  false = 照旧跳过，查看器里就没有记忆块（0 调用，但提示词不完整）
+ * 还没有快照时（例如刚打开角色卡、刚刷新过页面、这一局还没聊过）怎么办：
+ *  true  = 从世界书容器条目就地接管一份快照；确实没有可接管的内容才跳过检索
+ *  false = 直接跳过，查看器里就没有记忆块（0 调用，但提示词不完整）
+ *
+ * 为什么不再“放行一次真实检索”：实测确认，打开角色卡后第一次点查看器之所以会真的
+ * 检索，就是这条兜底放行造成的（一次性的向量调用成本）。而它换来的收益只是
+ * “让第二次不再检索”，可第二次本来此时就该跳过 —— 等于花第一次的钱买第二次的免费。
+ * 所以改成接管世界书里已有的容器内容（Anima 每次生成结束都会清空容器，因此
+ * 条目非空 = 上一次真实回合的检索结果还在，正是我们要的那份），0 调用。
+ * 若条目本身也是空的，就没有任何记忆块可用，直接跳过。
  */
 const LIVE_FALLBACK_WHEN_NO_SNAPSHOT = true;
 
@@ -129,6 +136,40 @@ async function captureSnapshot() {
     hasSnapshot = true;
   } catch (e) {
     console.warn(`${TAG} 记录记忆块快照失败（不影响生成）:`, e);
+  }
+}
+
+/**
+ * 还没有快照时（刚打开角色卡 / 刚刷新）：直接从世界书容器条目的当前内容接管一份快照。
+ *
+ * 依据：Anima 每次生成结束都会清空这两个容器条目，所以“条目非空”就意味着
+ * 上一次真实回合的检索结果还留在那里、尚未被清掉 —— 正是上一次请求实际注入的内容。
+ * 接管后无需再写回（内容本来就在条目里），只需照常跳过检索即可。
+ *
+ * @returns {Promise<boolean>} 是否成功接管到快照（条目全空则返回 false）
+ */
+async function adoptSnapshotFromWorldbook() {
+  if (hasSnapshot || !LIVE_FALLBACK_WHEN_NO_SNAPSHOT) return false;
+  try {
+    const read = await readEntries();
+    if (!read) return false;
+
+    const next = {};
+    const filled = [];
+    for (const name of SNAPSHOT_ENTRY_NAMES) {
+      const entry = read.entries.find(e => e.name === name);
+      next[name] = entry ? String(entry.content ?? '') : '';
+      if (next[name].trim() !== '') filled.push(name);
+    }
+    if (filled.length === 0) return false; // 条目也是空的，没有任何记忆块可用
+
+    snapshot = next;
+    hasSnapshot = true;
+    console.log(`${TAG} 从世界书接管上次注入的记忆块作为快照: ${filled.join(' / ')}`);
+    return true;
+  } catch (e) {
+    console.warn(`${TAG} 从世界书接管快照失败（不影响生成）:`, e);
+    return false;
   }
 }
 
@@ -221,15 +262,23 @@ function buildGuard(original) {
 
     // 非用户回合（提示词查看器 / 插件伪造生成）
     const hadSnapshot = await restoreSnapshot();
-    if (!hadSnapshot && LIVE_FALLBACK_WHEN_NO_SNAPSHOT) {
-      console.log(`${TAG} 尚无记忆块快照，放行一次真实检索以保证提示词完整`);
-      lastAction = '放行真实检索（无快照兜底）';
-      const result = await original.call(this, chat, contextSize, abort, type);
-      await captureSnapshot();
-      renderStatus();
-      return result;
+    if (!hadSnapshot) {
+      // 刚打开角色卡 / 刚刷新：先试着从世界书里接管上次注入的记忆块，仍然 0 检索。
+      const adopted = await adoptSnapshotFromWorldbook();
+      if (adopted) {
+        // 接管成功：内容本来就在条目里，不需要再写回，直接按伪造生成跳过检索。
+        fakeTurnPending = true;
+        lastAction = '跳过检索（记忆块取自世界书）';
+        console.log(`${TAG} 非用户回合（提示词查看器/插件伪造生成），跳过 RAG 检索（记忆块取自世界书）`);
+        renderStatus();
+        return; // 不调用原拦截器 = 不请求向量/重排模型
+      }
+      console.log(`${TAG} 尚无记忆块快照，且世界书容器为空，直接跳过检索（不再兜底检索）`);
     }
 
+    // 注意：无论是否拿到了记忆块，伪造生成都必须置位 fakeTurnPending，
+    // 否则 CHAT_COMPLETION_SETTINGS_READY 时不会补发 generation_stopped，
+    // Anima 挂在 generation_ended 上的收尾（状态变量更新）就会照常跑一遍。
     fakeTurnPending = true;
     lastAction = restoredThisTurn ? '跳过检索 + 已回填记忆块' : '跳过检索（本次未回填）';
     console.log(
